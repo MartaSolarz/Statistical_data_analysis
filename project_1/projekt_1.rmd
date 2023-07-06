@@ -1,0 +1,556 @@
+---
+title: "Statystyczna analiza danych - projekt zaliczeniowy 1"
+author: "Marta Solarz"
+output:
+  pdf_document: default
+  encoding: "UTF-8"
+---
+
+## 1. Wczytanie i podsumowanie danych
+```{r}
+df <- read.csv('/home/websensa/Studies/SAD/projekt_1/people.csv')
+
+# nagłówek
+head(df)
+# liczba wierszy i kolumn
+dim(df)
+# informacje o każdej zmiennej
+str(df)
+# zmienna stan cywilny mimo, że reprezentowana jest liczbami,
+# w rzeczywistości jest rozróżnieniem jakościowym - zamieńmy ją zatem na factor
+df$stan_cywilny <- as.factor(df$stan_cywilny)
+# sprawdzenie w których kolumnach występują NA
+sapply(df, function(x) any(is.na(x)))
+# liczba wartości NA
+sum(is.na(df))
+# statystyki opisowe dla kolumn ilościowych
+summary(df[c("wiek", "waga", "wzrost", "liczba_dzieci",
+             "wydatki", "wydatki_zywnosc", "oszczednosci")])
+# tabele częstości dla zmiennych jakościowych
+table(df$plec)
+table(df$budynek)
+table(df$stan_cywilny)
+```
+W zbiorze mamy 499 obserwacji, zmiennych ilościowych jest 7 ("wiek", "waga", "wzrost", "liczba_dzieci", "wydatki", "wydatki_zywnosc", "oszczednosci"), a jakościowych 3 ("plec", "budynek", "stan_cywilny" - wyrażony liczbą, ale będący jakościowym rozróżnieniem). Występuje 38 braków danych, wszystkie w kolumnie "plec".
+
+Statystyki opisowe: mają sens dla zmiennych ilościowych (wygenerowane powyżej), dzięki funkcji summary można sprawdzić m.in. wartości mediany, średniej, wartości maksymalnej i minimalnej. Analizując opis danych, można zauważyć m.in., że wartość mediany wieku wynosi 39 lat, a wartość mediany wagi 67,5 kg. Średnia liczba dzieci wynosi 1,561, a wartość mediany wydatków to 2493,3. Oszczędności wynoszą średnio 476,64, a 25% badanych ma oszczędności mniejsze niż 72,87. Zauważmy także, że wszystkie wartości maksymalne i minimalne są prawdopodobne, więc możemy założyć że nie ma błędów w danych.
+
+Tabele częstości: mają sens dla rozróżnień jakościowych. W zbiorze danych mamy 238 kobiety i 223 mężczyzn. 54 osoby mieszkają w apartamencie, 187 w domu jednorodzinnym, 105 w kamienicy, 53 w loftach, a w budynkach wielkopłytowych 100 osób. Ponadto 326 osób jest stanu wolnego (kawaler/panna), a 173 w związkach małżeńskich.
+
+Przed przystąpieniem do dalszych analiz sprawdzimy normalność rozkładu zmiennych ilościowych (potem ta informacja przyda się do wyboru odpowiedniego testu statystycznego).
+
+```{r}
+library(dplyr)
+
+choose_numeric_columns <- function(df) {
+  return(select_if(df, is.numeric))
+}
+
+# Sprawdzenie, które zmienne mają rozkład normalny:
+# H0: rozkład i-tej zmiennej jest normalny
+# H1: rozkład i-tej zmiennej jest różny od normalnego
+# poziom istotności alpha - 0.05
+choose_gauss_variables <- function(df, alpha=0.05) {
+  dane <- select_if(df, function(x) {
+    if (length(unique(x)) == 1) {
+      return(FALSE)
+    } else {
+      result <- shapiro.test(x)
+      return(result$p.value > alpha)
+    }
+  })
+  return(dane)
+}
+
+ilosciowe <- choose_numeric_columns(df)
+names(choose_gauss_variables(ilosciowe, 0.05))
+```
+Na podstawie przeprowadzonych testów normalności Shapiro-Wilka dla zmiennych ilościowych na poziomie istotności 0.05 możemy stwierdzić, że tylko w przypadku zmiennej "wzrost" nie ma przesłanek do odrzucenia H0. Dla pozostałych zmiennych przyjmujemy hipotezę H1 (rozkład jest różny od rozkładu normalnego).
+
+## 2. Sprawdzenie, czy występują pomiędzy zmiennymi zależności
+
+### I. Zmienne ilościowe
+
+**Kroki postępowania:**
+
+1. Liczymy korelację między danymi ilościowymi
+2. Przygotowujemy macierz korelacji (dla wszystkich zmiennych ilościowych)
+3. Sprawdzamy istotność zależności między zmiennymi
+4. Przygotowujemy macierz korelacji tylko dla tych zmiennych, które są istotne statystycznie
+```{r}
+library(ggplot2)
+library(reshape2)
+
+# 1.
+cor_matrix <- round(cor(df[c("wiek", "waga",
+                             "wzrost", "liczba_dzieci",
+                             "wydatki", "wydatki_zywnosc",
+                             "oszczednosci")]), 2)
+
+# 2.
+ggplot(data = reshape2::melt(cor_matrix)) +
+  geom_tile(aes(x = Var1, y = Var2, fill = value)) +
+  scale_fill_gradient2(low = "blue", high = "red") +
+  geom_text(aes(x = Var1, y = Var2, label = value)) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        axis.text.y = element_text(size = 10),
+        panel.grid = element_blank(),
+        legend.position = "none") +
+  labs(x = "Zmienne", y = "Zmienne", fill = "Wsp. korelacji")
+
+# 3.
+# H0: brak zależności między zmiennymi ilościowymi X i Y
+# H1: istnieje zależność między zmiennymi ilościowymi X i Y
+# alpha = 0.05 - domyślny
+# stosujemy test spearmana z powodu braku rozkładu normalnego
+# dla conajmniej jednej zmiennej wśród badanych par
+macierz_korelacji <- cor(ilosciowe, use = "pairwise.complete.obs", method = "spearman")
+macierz_p <- matrix(nrow=ncol(ilosciowe), ncol=ncol(ilosciowe))
+
+# Uzupełniamy macierz p-value
+for (i in seq(ncol(ilosciowe))) {
+  for (j in seq(ncol(ilosciowe))) {
+    korelacja_wsk <- cor.test(ilosciowe[, i], ilosciowe[, j],
+                              use="complete.obs", method = "spearman", exact = FALSE)
+    p_val <- korelacja_wsk$p.value
+    macierz_p[i,j] <- p_val
+  }
+}
+
+istotne <- macierz_p
+istotne[macierz_p < 0.05] <- 1
+istotne[macierz_p >= 0.05] <- NA
+
+macierz_ist_korelacji <- macierz_korelacji
+macierz_ist_korelacji[is.na(istotne)] <- NA
+
+# 4.
+ggplot(data = reshape2::melt(macierz_ist_korelacji), aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red") +
+  geom_text(aes(label = round(value, 2))) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+        axis.text.y = element_text(size = 10),
+        panel.grid = element_blank(),
+        legend.position = "none") +
+  labs(x = "Zmienne", y = "Zmienne", fill = "Wsp. korelacji")
+```
+
+Zależność istotna statystycznie widoczna jest dla:
+
+- wydatków i wydatków na żywność (korelacja wynosi 1)
+- wiek i oszczędności (0.86)
+- wzrostu i wagi (0.68)
+- wydatków na żywność i liczby dzieci (0.6)
+- wydatków i liczby dzieci (0.59)
+- wydatki i wiek oraz wydatki na żywność i wiek (0.24)
+- wydatki i waga oraz wydatki na żywność i waga (-0.12)
+- wydatki i wzrost oraz wydatki na żywność i wzrost (-0.17)
+
+A zatem otrzymaliśmy wyniki, które wydają się bardzo prawdopodobne - uzasadnione jest zakładanie, że wydatki są mocno powiązane z wydatkami na żywność, wiek z oszczędnościami, wzrost z wagą, a także wydatki i wydatki na żywność z liczbą dzieci. Natomiast między wydatkami, wydatkami na żywność a wiekiem, wagą i wzrostem nie ma intuicyjnie powodu, aby obserwowalna była silna zależność.
+
+Pozostałe zależności (widoczne na pierwszym rysunku) nie są istotne statystycznie.
+
+### II. Zmienne jakościowe
+```{r}
+# H0: brak zależności między zmiennymi jakościowymi X i Y
+# H1: istnieje zależność między zmiennymi jakościowymi X i Y
+# alpha = 0.05 - domyślny
+# test chi2 - badamy zmienne jakościowe
+
+# Dla stanu cywilnego i rodzaju budynku:
+tab <- table(df$stan_cywilny, df$budynek)
+chisq.test(tab)
+
+# Dla płci i rodzaju budynku
+tab <- table(df$plec, df$budynek)
+chisq.test(tab)
+
+# Dla płci i stanu cywilnego
+tab <- table(df$plec, df$stan_cywilny)
+chisq.test(tab)
+```
+
+Dla wszystkich przypadków otrzymane wartości p są większe od alpha, stąd możemy wnioskować, że nie ma podstaw do odrzucenia H0 we wszystkich trzech powyższych przypadkach (nie istnieje istotna statystycznie zależność między tymi zmiennymi).
+
+Poniżej znajdują się wykresy słupkowe ukazujące powiązania między zmiennymi jakościowymi.
+
+```{r}
+ggplot(data = df, aes(x = stan_cywilny, fill = budynek)) +
+  geom_bar(position = "dodge") +
+  labs(x = "Stan cywilny", y = "Liczba mieszkancow", fill = "Budynek")
+
+ggplot(data = df, aes(x = plec, fill = budynek)) +
+  geom_bar(position = "dodge") +
+  labs(x = "Plec", y = "Liczba mieszkancow", fill = "Budynek")
+
+ggplot(data = df, aes(x = stan_cywilny, fill = plec)) +
+  geom_bar(position = "dodge") +
+  labs(x = "Stan cywilny", y = "Liczba osob", fill = "Plec")
+```
+
+## 3. Podsumowanie danych przynajmniej trzema różnymi wykresami
+
+Część dodatkowych wykresów została wykonana powyżej. Teraz zajmę się wygenerowaniem wykresów obowiązkowych.
+
+```{r}
+# scatter-plot
+ilosciowe_vars <- names(ilosciowe)
+
+for (i in seq(along = ilosciowe_vars)[-7]) {
+  print(ggplot(data = ilosciowe, aes(x = !!sym(ilosciowe_vars[i]), y = oszczednosci)) +
+          geom_point(shape = 1, color = "blue") +
+          labs(title = paste("Scatterplot dla zmiennej", ilosciowe_vars[i])))
+}
+
+# boxplot - dla wydatków w podziale na stan cywilny
+ggplot(data = df, aes(x = stan_cywilny, y = wydatki)) +
+  geom_boxplot(fill = "lightblue", color = "darkblue") +
+  labs(title = "Wykres pudelkowy dla wydatkow w podziale na stan cywilny")
+
+# kołowy - dla budynków
+freq_table <- table(df$budynek)
+freq_table_prop <- as.numeric(round(prop.table(freq_table) * 100))
+prec <- paste(freq_table_prop, "%")
+df_kolowy <- data.frame(freq_table, prec)
+colnames(df_kolowy) <- c("typ_budynku", "liczebnosc", "procent")
+
+ggplot(df_kolowy, aes(x = "", y = procent, fill = typ_budynku)) +
+  geom_col() +
+  geom_text(aes(label = procent), position = position_stack(vjust = 0.5), show.legend = FALSE) +
+  coord_polar(theta = "y", clip = "off") + theme_void() +
+        labs(title = "Wykres kolowy udzialu poszczegolnych miejsc zamieszkania")
+
+```
+
+## 4. Hipotezy o średniej i medianie wagi
+
+*Polecenie:*
+Policzyć p-wartości dla hipotez o wartości średniej m=70kg i medianie me=65kg dla zmiennej waga, osobno na próbach dla kobiet i mężczyzn, przyjąć statystykę testową dla alternatywy lewostronnej.
+
+```{r}
+women <- na.omit(df[df$plec == "K", ])
+men <- na.omit(df[df$plec == "M", ])
+# mamy próby > 30 każda
+# sprawdzamy normalność tych danych:
+
+# H0: rozkład X jest normalny
+# H1: rozkład X jest różny od normalnego
+# alpha = 0.01 --> chcemy odrzucać normalność danych tylko jeśli przesłanka jest bardzo silna
+shapiro.test(women$waga)
+# p > alpha -> brak podstaw do odrzucenia H0
+
+shapiro.test(men$waga)
+# p > alpha -> brak podstaw do odrzucenia H0
+
+# poniżej dodatkowo przygotowany wykres gęstości:
+density_women <- density(women$waga, na.rm = TRUE)
+density_men <- density(men$waga, na.rm = TRUE)
+ggplot() +
+  geom_line(data = data.frame(x = density_women$x, y = density_women$y, sex = "women"),
+            aes(x, y, color = sex, linetype = "dashed")) +
+  geom_line(data = data.frame(x = density_men$x, y = density_men$y, sex = "men"),
+            aes(x, y, color = sex, linetype = "dashed")) +
+  scale_color_manual(values = c("women" = "red", "men" = "blue")) +
+  scale_linetype_manual(values = c("dashed", "dashed")) +
+  labs(x = "Waga [kg]", color = "", linetype = "") +
+  theme_classic()
+
+
+# Test dla wartości średniej
+# mamy dane z rozkładu normalnego o nieznanych średniej i wariancji
+# założenie jest uprawnione na mocy powyższego testu normalności
+# H0: m = 70 kg
+# H1: m < 70 kg
+# alpha = 0.05 - uprawione założenie, standardowa wartość alpha
+# a zatem stosujemy test t-studenta
+
+# Test średniej dla kobiet
+t.test(women$waga, mu = 70, alternative = "less")
+# p < alpha --> przyjmujemy H1
+
+# Test średniej dla mężczyzn
+t.test(men$waga, mu = 70, alternative = "less")
+# p > alpha --> brak podstaw do odrzucenia H0
+
+# Test dla mediany
+# do testowania mediany korzystamy z testów nieparametrycznych
+# (nie ma znaczenia rozkład danych)
+# H0: me = 65 kg
+# H1: me < 65 kg
+# alpha = 0.05 - uprawione założenie, standardowa wartość alpha
+
+# Test mediany dla kobiet
+wilcox.test(women$waga, mu = 65, alternative = "less")
+# p > alpha --> brak podstaw do odrzucenia H0
+
+# Test mediany dla mężczyzn
+wilcox.test(men$waga, mu = 65, alternative = "less")
+# p > alpha --> brak podstaw do odrzucenia H0
+
+```
+
+## 5. Przedziały ufności
+
+*Polecenie:*
+Policzyć dwustronne przedziały ufności na poziomie ufności 0.99 dla zmiennej wiek dla
+następujących parametrów rozkładu:
+
+- średnia i odchylenie standardowe;
+- kwantyle 1/4, 2/4 i 3/4.
+```{r}
+# Średnia
+mean_age <- mean(df$wiek)
+sd_age <- sd(df$wiek)
+
+# wartość kwantyla t-studenta dla danego poziomu ufności i liczności próby
+n <- length(df$wiek)
+t_critical <- qt(0.995, n-1) # 0.995 -> bo dwustronny (z obu stron po 0.005)
+
+# granice przedziału ufności
+margin_of_error <- t_critical * sd_age / sqrt(n)
+lower_limit <- mean_age - margin_of_error
+upper_limit <- mean_age + margin_of_error
+
+cat("Dwustronny przedział ufności dla średniej wieku na poziomie ufności 0.99:\n",
+    paste0("[", round(lower_limit, 2), ", ", round(upper_limit, 2), "]"))
+
+# Odchylenie standardowe
+lower_quantile <- qchisq(0.005, n-1)
+upper_quantile <- qchisq(0.995, n-1)
+
+margin_of_error_lower <- sqrt((n-1)*sd_age^2/lower_quantile)
+margin_of_error_upper <- sqrt((n-1)*sd_age^2/upper_quantile)
+lower_limit <- sd_age - margin_of_error_lower
+upper_limit <- sd_age + margin_of_error_upper
+
+cat("Dwustronny przedział ufności dla odchylenia standardowego wieku
+na poziomie ufności 0.99:\n",
+    paste0("[", round(lower_limit, 2), ", ", round(upper_limit, 2), "]"))
+
+# Kwantyle
+library(EnvStats)
+cat("Przedział ufności dla pierwszego kwartyla (0.25) na poziomie ufności 0.99 wynosi")
+as.numeric(EnvStats::eqnpar(x=df$wiek, p=0.25, ci=TRUE, ci.method="exact",
+                            approx.conf.level=0.99)$interval$limits)
+
+cat("Przedział ufności dla drugiego kwartyla (0.5) na poziomie ufności 0.99 wynosi")
+as.numeric(EnvStats::eqnpar(x=df$wiek, p=0.5, ci=TRUE, ci.method="exact",
+                            approx.conf.level=0.99)$interval$limits)
+
+cat("Przedział ufności dla trzeciego kwartyla (0.75) na poziomie ufności 0.99 wynosi")
+as.numeric(EnvStats::eqnpar(x=df$wiek, p=0.75, ci=TRUE, ci.method="exact",
+                            approx.conf.level=0.99)$interval$limits)
+```
+
+*Przyjęte założenia:*
+
+- Dane pochodzą z próby losowej i są niezależne od siebie - uzasadnione, brak podstaw aby zakładać ich zależność;
+- rozkład zmiennej w próbie jest mniej więcej normalny lub przyjmujemy, że próba jest wystarczająco liczna, aby na mocy Centralnego Twierdzenia Granicznego zbiegała do rozkładu normalnego (w naszym przypadku zmienna wiek nie ma rozkładu normalnego, ale zakładam, że 499 obserwacji to wystarczająco dużo, aby powołać sie na CTG).
+
+
+## 6. Pytania badawcze
+
+### 1. Czy istnieją różnice w średnich wartościach wybranej zmiennej pomiędzy osobami zamężnymi/żonatymi a pannami/kawalerami w podpróbie osób w wieku poniżej 40 lat?
+
+```{r}
+# H0: Średni wydatki osób poniżej 40 r.ż. w zależności od stanu cywilnego
+# nie różnią się istotnie statystycznie.
+# H1: Średnie wydatki osób poniżej 40 r.ż. w zależności od stanu cywilnego
+# różnią się istotnie statystycznie.
+# alpha = 0.01
+
+ponizej_40 <- df[df$wiek < 40, ]
+stan_wolny <- ponizej_40[ponizej_40$stan_cywilny == "0",]
+w_malzenstwie <- ponizej_40[ponizej_40$stan_cywilny == "1",]
+
+# Najpierw sprawdzamy czy te dane mają rozkład normalny
+# (to determinuje wybór odpowiedniego testu wartości średnich dla dwóch grup)
+# H0: rozkład jest normalny
+# H1: rozkład jest różny od normalnego
+# alpha: 0.01
+shapiro.test(stan_wolny$wydatki)
+# p > alpha --> brak podstaw do odrzucenia H0
+
+shapiro.test(w_malzenstwie$wydatki)
+# p > alpha --> brak podstaw do odrzucenia H0
+
+# A zatem uzasadnione jest zakładanie, że mamy dwie grupy o rozkładzie normalnym,
+# możemy korzystać z testu t-studenta dla grup niezależnych (zakładamy, że
+# osoby, które są w związku małżeńskim oraz osoby, które są w stanie wolnym,
+# nie są ze sobą powiązane w sposób umyślny).
+
+t.test(stan_wolny$wydatki, w_malzenstwie$wydatki,
+                 alternative = "two.sided", paired = FALSE, conf.level = 0.99)
+```
+p-wartość jest mniejsza niż alpha, stąd odrzucamy H0 i przyjmujemy H1. Zatem istnieje istotna statystycznie różnica w wydatkach między analizowanymi grupami.
+
+### 2. Czy w podpróbie osób w wieku poniżej 25 lat średnie wydatki ogółem są równe średnim wydatkom na żywność?
+
+```{r}
+# H0: Średnie wydatki ogółem są równe średnim wydatkom na żywność
+# w grupie wiekowej poniżej 25 r.ż.
+# H1: Średnie wydatki ogółem nie są równe średnim wydatkom na żywność
+# w grupie wiekowej poniżej 25 r.ż.
+# alpha = 0.01
+
+ponizej_25 <- df[df$wiek < 25,]
+
+# sprawdzamy normalność dla tych zmiennych:
+# H0: rozkład jest normalny
+# H1: rozkład jest różny od normalnego
+# alpha: 0.01
+shapiro.test(ponizej_25$wydatki)
+# p > alpha --> brak podstaw do odrzucenia H0
+shapiro.test(ponizej_25$wydatki_zywnosc)
+# p > alpha --> brak podstaw do odrzucenia H0
+
+# sprawdzamy zależność zmiennych --> mamy rozkład normalny,
+# więc stosujemy test do sprawdzenia zależności metodą Pearsona
+# H0: brak zależności między zmiennymi
+# H1: zmienne są zależne
+# alpha = 0.01
+cor.test(ponizej_25$wydatki_zywnosc, ponizej_25$wydatki, method = "pearson")
+# p < alpha --> przyjmujemy H1
+
+# A zatem na mocy testów uzasadnione jest zakładanie,
+# że mamy dwie grupy zmiennych zależnych o rozkładzie normalnym
+# korzystamy zatem z testu t-studenta dla grup zależnych
+
+t.test(ponizej_25$wydatki, ponizej_25$wydatki_zywnosc, paired = TRUE,
+       alternative = "two.sided", conf.level = 0.95)
+```
+p-wartość jest mniejsza niż alpha, stąd odrzucamy H0 i przyjmujemy H1. Istnieją zatem istotne statystycznie różnice między średnimi wydatkami ogółem a wydatkami na żywność w grupie osób poniżej 25 r.ż.
+
+### 3. Czy niższy udział wydatków na żywność w wydatkach ogółem jest skorelowany z wyższymi oszczędnościami?
+
+```{r}
+# H0: brak korelacji między oszczędnościami a wydatkami na żywność
+# H1: istnieje korelacja (dodatnia bądź ujemna) między oszczędnościami a wydatkami na żywność
+# alpha = 0.01
+
+# zakładamy brak rozkładu normalnego zmiennych (na mocy testu na początku projektu)
+# zatem korzystamy z testu korelacji rang Spearmana
+cor.test(df$wydatki_zywnosc, df$oszczednosci, method = "spearman", conf.level = 0.99)
+```
+Wynik testu korelacji rangowej Spearmana wskazuje na słabą, ujemną korelację między wydatkami na żywność a oszczędnościami. Wartość współczynnika korelacji wynosi -0.077, co oznacza, że osoby, które wydają mniej na jedzenie, zwykle mają nieznacznie wyższe oszczędności. Jednakże, wynik testu nie jest istotny na poziomie istotności alpha=0.01 (p-value = 0.08456 > 0.01), co oznacza, że nie ma wystarczających dowodów, aby odrzucić H0 o braku korelacji między zmiennymi.
+
+### 4. Przetestuj hipotezę o zgodności z konkretnym rozkładem parametrycznym dla wybranej zmiennej (np. "zmienna A ma rozkład wykładniczy z parametrem 10")
+```{r}
+# H0: rozkład zmiennej oszczędności jest rozkładem wykładniczym
+# z parametrem lambda = 1/mean(oszczędności)
+# H1: rozkład zmiennej oszczędności jest różny od wykładniczego
+# z parametrem lambda = 1/mean(oszczędności)
+# alpha: 0.01
+# wybieramy test Kołmogorowa-Smirnova a nie Pearsona, bo mamy zmienną typu ciągłego
+
+ks.test(df$oszczednosci, "pexp", rate = 1/mean(df$oszczednosci))
+```
+A zatem p wartość jest mniejsza od alpha, więc istnieją podstawy do odrzucenia H0 i przyjęcia H1. A zatem nie ma podstaw aby sądzić, że zmienna oszczędności ma rozkład wykładniczy z parametrem lambda = 1/mean(oszczędności).
+
+## 7. Regresja liniowa
+```{r}
+library(stats)
+
+# Oszacowanie pełnego modelu regresji liniowej
+model <- lm(oszczednosci ~ ., data=df)
+summary(model)
+
+# wyświetlenie diagramów diagnostycznych w celu stwierdzenia, czy konieczne są transformacje
+par(mfrow=c(2,2))
+plot(model)
+```
+Na podstawie wykresów możemy uznać, że transformacje nie są konieczne:
+
+- wykres 1 (residuals vs fitted): mamy mniej więcej równomierne rozłożenie punktów wokół linii, zatem warunek liniowości jest spełniony.
+- wykres 2 (normal Q-Q): punkty w większości są dobrze dopasowane do teoretycznego rozkładu normalnego.
+- wykres 3 (scale-location): homoskedadyczność jest zachowywana.
+- wykres 4 (residuals vs leverage): brak widocznych dźwigni w danych.
+
+
+```{r}
+# wykres regresji dla pełnego modelu
+ggplot(na.omit(df), aes(x=oszczednosci, y=predict(model))) +
+  geom_point(col='red', shape=1) +
+  geom_smooth(method="lm") +
+  xlab("Oszczednosci") +
+  ylab("Przewidywane oszczednosci")
+```
+
+Wartości współczynnika determinacji Multiple R-squared i Adjusted R-squared opisują, jak wiele zmienności zmiennej zależnej jest wyjaśniane przez model. Multiple R-squared wynosi 0,9671, co oznacza, że 96,71% zmienności zmiennej oszczędności jest wyjaśnione przez zmienne objaśniające. Adjusted R-squared jest zbliżony do Multiple R-squared, co oznacza, że dodanie nowych zmiennych do modelu nie poprawia jego jakości.
+
+F-statistic i p-wartość testu F opisują jakość dopasowania modelu. Wartość F-statistic jest wyższa od 1, co oznacza, że model ma lepsze dopasowanie niż model zerowy (bez zmiennych objaśniających). P-wartość testu F wynosi < 2,2e-16, co oznacza, że istnieje istotna zależność między zmiennymi objaśniającymi a zmienną objaśnianą.
+
+Residual standard error opisuje jak dobrze model dopasowuje się do danych, a wartość wynosząca 102.1 oznacza, że błąd resztowy ma przeciętną wartość 102.1.
+
+Podsumowując:
+
+- RSS wynosi 102.1.
+- Multiple R-squared wynosi 0.9671, a Adjusted R-squared wynosi 0.9662.
+- p-wartości dla poszczególnych współczynników można znaleźć w kolumnie "Pr(>|t|)" w podsumowaniu modelu.
+- Oszacowania współczynników znajdują się w kolumnie "Estimate" w podsumowaniu modelu.
+
+```{r}
+# sprawdzamy jak zmieni się model gdy usuniemy kolejno każdą ze zmiennych:
+model_bez_wzrostu <- lm(oszczednosci ~ .-wzrost, data=df)
+summary(model_bez_wzrostu)
+
+model_bez_wagi <- lm(oszczednosci ~ .-waga, data=df)
+summary(model_bez_wagi)
+
+model_bez_wieku <- lm(oszczednosci ~.-wiek, data=df)
+summary(model_bez_wieku)
+
+model_bez_wydatkow <- lm(oszczednosci ~.-wydatki, data=df)
+summary(model_bez_wydatkow)
+
+model_bez_wydatki_na_zywnosc <- lm(oszczednosci ~ .-wydatki_zywnosc, data=df)
+summary(model_bez_wydatki_na_zywnosc)
+
+model_bez_liczby_dzieci <- lm(oszczednosci ~.-liczba_dzieci, data=df)
+summary(model_bez_liczby_dzieci)
+
+model_bez_plci <- lm(oszczednosci ~.-plec, data=df)
+summary(model_bez_plci)
+
+model_bez_stanu_cyw<- lm(oszczednosci ~.-stan_cywilny, data=df)
+summary(model_bez_stanu_cyw)
+
+model_bez_budynku <- lm(oszczednosci ~.-budynek, data=df)
+summary(model_bez_budynku)
+```
+
+Zatem porównując wyniki z pominięciem którejś ze zmiennych zauważyć można, że odrzucenie zmiennej wiek zdecydowanie obniża jakość modelu (gwałtowanie zmniejsza się wartość R2, a RSS rośnie). W przypadku zmiennych: wydatki na żywność, płeć i stan cywilny wartości R2 i RSS nie ulegają żadnej zmianie w stosunku do pełnego modelu - stąd można wnioskować, że te zmienne nie mają dużego znaczenia w modelu i są kandydatami do odrzucenia. Pozbawienie pełnego modelu jednej z pozostałych zmiennych powoduje jego nieznaczne pogorszenie (nieznaczny spadek R2 i wzrost RSS).
+
+Analizując p-wartości w pełnym modelu, można zauważyć, że ich wartości potwierdzają powyższą konkluzję: wydatki na żywność, płeć i stan cywilny nie wpływają istotnie statystycznie na zmienną objaśnianą. Największa p-wartość otrzymana została dla zmiennej płeć, zatem ją w pierwszej kolejności należałoby usunąć.
+
+Nowy model bez zmiennej płeć:
+
+```{r}
+nowy_df <- df[, -which(names(df) == "plec")]
+nowy_model <- lm(oszczednosci~., data=nowy_df)
+summary(nowy_model)
+
+# wykres regresji
+ggplot(nowy_df, aes(x=oszczednosci, y=predict(nowy_model))) +
+  geom_point(col='red', shape=1) +
+  geom_smooth(method="lm") +
+  xlab("Oszczednosci") +
+  ylab("Przewidywane oszczednosci")
+
+# wykresy diagnostyczne
+par(mfrow=c(2,2))
+plot(nowy_model)
+```
+
+Analiza szczegółowa wykresów diagnostycznych:
+
+1. Wykres 1 (residuals vs fitted): pokazuje zależność między wartościami reszt a wartościami przewidywanymi przez model. Każdy punkt na wykresie odpowiada jednemu obserwowanemu punktowi danych, a jego położenie pokazuje, jak bardzo odpowiadająca mu wartość resztowa różni się od wartości przewidywanej przez model. W naszym przypadku mamy mniej więcej równomierne rozłożenie punktów wokół linii --> możemy przyjąć, że warunek liniowości jest spełniony.
+
+2. Wykres 2 (normal Q-Q): służy do diagnozowania założenia normalności rozkładu reszt w modelu regresji liniowej. W naszym przypadku punkty w większości są dobrze dopasowane --> pojedyncze punkty leżą dalej od linii rozkładu normalnego.
+
+3. Wykres 3 (scale-location): używany jest do sprawdzenia założenia homoskedastyczności (jednorodności wariancji) reszt. W naszym przypadku możemy uznać, że wariancja reszt jest stała (punkty rozkładają się mniej więcej równomiernie).
+
+4. Wykres 4 (residuals vs leverage): służy do identyfikacji obserwacji, które mają duży wpływ na dopasowanie modelu (tzw. obserwacje odstające lub obserwacje z dużą dźwignią). Im bardziej odległa od środka jest wartość na wykresie dla danej obserwacji, tym większy wpływ ma ta obserwacja na dopasowanie modelu. Wartości zbyt odległe od środka (poza czerwoną linią) sugerują, że obserwacja ta może wpłynąć na wyniki modelu i warto ją zbadać dokładniej. W naszym przypadku wszystkie punkty znajdują się wewnątrz obszaru krytycznego, zatem możemy uznać, że nie ma wartości odstających, które w znaczący sposób wpływałyby na nasz model.
+
+Na podstawie powyższej analizy możemy zatem uznać, że dla nowego modelu (bez zmiennej płeć) założenia modelu liniowego są spełnione.
